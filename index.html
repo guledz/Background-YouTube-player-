@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1a17">
+<title>Background Player</title>
+<style>
+:root{--bg:#0e1a17;--panel:#162823;--ink:#e8e4d8;--mute:#8fa59d;--sig:#7fd1ae;--line:#25403a}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times New Roman",serif;min-height:100vh;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom))}
+main{max-width:560px;margin:0 auto}
+h1{font-size:1.6rem;font-weight:400;margin:8px 0 4px}
+p.sub{color:var(--mute);margin:0 0 16px;font-size:.95rem}
+.add{display:flex;gap:8px}
+input{flex:1;min-width:0;padding:12px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:inherit}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:10px 14px}
+button:hover{border-color:var(--sig)}
+button.main{background:var(--sig);color:#07140f;border-color:var(--sig)}
+:focus-visible{outline:2px solid var(--sig);outline-offset:2px}
+.screen{margin:16px 0;border-radius:10px;overflow:hidden;background:#000;aspect-ratio:16/9}
+.screen iframe,.screen #yt{width:100%;height:100%;display:block}
+#title{margin:0 0 8px;font-size:1.05rem;min-height:1.6em}
+input[type=range]{width:100%;padding:0;accent-color:var(--sig)}
+.time{display:flex;justify-content:space-between;color:var(--mute);font-size:.85rem}
+.ctl{display:flex;justify-content:center;gap:12px;margin:14px 0}
+.ctl button{min-width:64px;font-size:1.1rem}
+ol{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+li{display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid var(--line)}
+li .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+li.on .t{color:var(--sig)}
+li button{padding:4px 10px}
+#msg{color:var(--mute);font-size:.85rem;margin-top:14px}
+@media (prefers-reduced-motion:no-preference){button{transition:border-color .15s}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Background Player</h1>
+  <p class="sub">Paste YouTube links, press play, then switch apps or lock the screen.</p>
+
+  <div class="add">
+    <input id="url" type="url" placeholder="Paste a YouTube link" aria-label="YouTube link">
+    <button id="addBtn" class="main">Add</button>
+  </div>
+
+  <div class="screen"><div id="yt"></div></div>
+
+  <p id="title">Nothing playing</p>
+  <input id="seek" type="range" min="0" max="100" value="0" step="1" aria-label="Seek">
+  <div class="time"><span id="cur">0:00</span><span id="dur">0:00</span></div>
+
+  <div class="ctl">
+    <button id="prev" aria-label="Previous">⏮</button>
+    <button id="play" class="main" aria-label="Play or pause">▶</button>
+    <button id="next" aria-label="Next">⏭</button>
+  </div>
+
+  <ol id="list"></ol>
+  <p id="msg"></p>
+</main>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+const $ = id => document.getElementById(id);
+let queue = [{id:'UFtZigb5_to', title:'UFtZigb5_to'}], idx = 0, player, ready = false, wantPlay = false, timer;
+
+try { const s = JSON.parse(localStorage.getItem('bgq')); if (s && s.q && s.q.length) { queue = s.q; idx = Math.min(s.i||0, queue.length-1); } } catch(e){}
+const save = () => { try { localStorage.setItem('bgq', JSON.stringify({q:queue,i:idx})); } catch(e){} };
+
+function parseId(s){
+  s = s.trim();
+  if (/^[\w-]{11}$/.test(s)) return s;
+  try {
+    const u = new URL(s);
+    if (u.hostname === 'youtu.be') return u.pathname.slice(1,12);
+    const v = u.searchParams.get('v'); if (v) return v.slice(0,11);
+    const m = u.pathname.match(/\/(shorts|embed|live)\/([\w-]{11})/); if (m) return m[2];
+  } catch(e){}
+  return null;
+}
+const fmt = t => { t = Math.floor(t||0); return Math.floor(t/60) + ':' + String(t%60).padStart(2,'0'); };
+
+// Silent audio keeps the browser's media session alive while the tab is hidden
+const silent = new Audio();
+silent.loop = true;
+(function(){
+  const n = 8000, b = new ArrayBuffer(44+n), v = new DataView(b);
+  const w = (o,s)=>[...s].forEach((c,i)=>v.setUint8(o+i,c.charCodeAt(0)));
+  w(0,'RIFF'); v.setUint32(4,36+n,true); w(8,'WAVEfmt '); v.setUint32(16,16,true); v.setUint16(20,1,true);
+  v.setUint16(22,1,true); v.setUint32(24,8000,true); v.setUint32(28,8000,true); v.setUint16(32,1,true); v.setUint16(34,8,true);
+  w(36,'data'); v.setUint32(40,n,true); new Uint8Array(b,44).fill(128);
+  silent.src = URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
+})();
+
+function onYouTubeIframeAPIReady(){
+  player = new YT.Player('yt', {
+    videoId: queue[idx].id,
+    playerVars: {playsinline:1, rel:0, modestbranding:1},
+    events: {
+      onReady: () => { ready = true; render(); updateTitle(); timer = setInterval(tick, 500); },
+      onStateChange: e => {
+        const S = YT.PlayerState;
+        if (e.data === S.PLAYING) { wantPlay = true; silent.play().catch(()=>{}); updateTitle(); }
+        if (e.data === S.PAUSED && !document.hidden) wantPlay = false;
+        if (e.data === S.ENDED) next();
+        $('play').textContent = e.data === S.PLAYING ? '⏸' : '▶';
+        if ('mediaSession' in navigator) navigator.mediaSession.playbackState = e.data === S.PLAYING ? 'playing' : 'paused';
+      },
+      onError: () => { $('msg').textContent = 'This video cannot be embedded. Skipping.'; next(); }
+    }
+  });
+}
+window.onYouTubeIframeAPIReady = onYouTubeIframeAPIReady;
+
+function updateTitle(){
+  const d = player && player.getVideoData && player.getVideoData();
+  if (d && d.title) {
+    queue[idx].title = d.title; save();
+    $('title').textContent = d.title; render();
+    if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({
+      title: d.title, artist: d.author || 'YouTube',
+      artwork: [{src:'https://i.ytimg.com/vi/'+queue[idx].id+'/hqdefault.jpg', sizes:'480x360', type:'image/jpeg'}]
+    });
+  }
+}
+function tick(){
+  if (!ready) return;
+  const c = player.getCurrentTime(), d = player.getDuration();
+  if (d) { $('seek').max = d; $('seek').value = c; $('dur').textContent = fmt(d); }
+  $('cur').textContent = fmt(c);
+}
+function load(i, play=true){
+  idx = (i + queue.length) % queue.length; save();
+  if (ready) { play ? player.loadVideoById(queue[idx].id) : player.cueVideoById(queue[idx].id); }
+  $('title').textContent = queue[idx].title; render();
+}
+function next(){ load(idx+1); }
+function prev(){ if (ready && player.getCurrentTime() > 4) player.seekTo(0); else load(idx-1); }
+function toggle(){
+  if (!ready) return;
+  player.getPlayerState() === YT.PlayerState.PLAYING ? (wantPlay=false, player.pauseVideo()) : player.playVideo();
+}
+function render(){
+  const ol = $('list'); ol.innerHTML = '';
+  queue.forEach((q,i) => {
+    const li = document.createElement('li'); if (i===idx) li.className = 'on';
+    const t = document.createElement('span'); t.className = 't'; t.textContent = q.title; t.onclick = () => load(i);
+    const x = document.createElement('button'); x.textContent = '✕'; x.setAttribute('aria-label','Remove');
+    x.onclick = () => { queue.splice(i,1); if (!queue.length) queue.push({id:'UFtZigb5_to',title:'UFtZigb5_to'}); if (i<idx) idx--; idx = Math.min(idx,queue.length-1); save(); render(); };
+    li.append(t,x); ol.append(li);
+  });
+}
+$('addBtn').onclick = () => {
+  const id = parseId($('url').value);
+  if (!id) { $('msg').textContent = 'That does not look like a YouTube link.'; return; }
+  queue.push({id, title:id}); $('url').value = ''; $('msg').textContent = ''; save(); render();
+  if (queue.length === 2 && !wantPlay) {} // keep current
+};
+$('url').addEventListener('keydown', e => { if (e.key === 'Enter') $('addBtn').click(); });
+$('play').onclick = toggle; $('next').onclick = next; $('prev').onclick = prev;
+$('seek').oninput = e => ready && player.seekTo(+e.target.value, true);
+
+if ('mediaSession' in navigator) {
+  const h = (a,f) => { try { navigator.mediaSession.setActionHandler(a,f); } catch(e){} };
+  h('play', () => player.playVideo()); h('pause', () => { wantPlay=false; player.pauseVideo(); });
+  h('nexttrack', next); h('previoustrack', prev);
+  h('seekto', e => player.seekTo(e.seekTime, true));
+}
+
+// If the browser pauses playback when the page is hidden, try to resume it
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && wantPlay) {
+    [300, 1000, 2500].forEach(ms => setTimeout(() => {
+      if (document.hidden && wantPlay && ready && player.getPlayerState() !== YT.PlayerState.PLAYING) player.playVideo();
+    }, ms));
+  }
+});
+render();
+</script>
+</body>
+</html>
